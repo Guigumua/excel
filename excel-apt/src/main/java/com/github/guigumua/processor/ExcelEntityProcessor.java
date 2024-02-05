@@ -131,12 +131,39 @@ public class ExcelEntityProcessor extends AbstractProcessor {
                               .map(ExcelColumn::name))
                   .filter(s -> !s.isBlank())
                   .orElse(property.name);
+          var cellValueGetter = switch (property.type.getKind()) {
+            case INT -> "(row.getCell(colIndex).asNumber().intValue());";
+            case BOOLEAN -> "(row.getCell(colIndex).asBoolean());";
+            case CHAR -> "(row.getCell(colIndex).getText().charAt(0));";
+            case LONG -> "(row.getCell(colIndex).asNumber().longValue());";
+            case DECLARED -> {
+              var type = property.type.toString();
+              if (type.equals("java.lang.String")) {
+                yield "(row.getCell(colIndex).getText());";
+              }
+              if (type.equals("java.util.Date")) {
+                yield "(java.util.Date.form(row.getCell(colIndex).asDate()).atZone(java.time.ZoneId.systemDefault()).toInstant());";
+              }
+              if (type.equals("java.time.LocalDate")) {
+                yield "(row.getCell(colIndex).asDate().toLocalDate());";
+              }
+              if (type.equals("java.time.LocalDateTime")) {
+                yield "(row.getCell(colIndex).asDate());";
+              }
+              if (type.equals("java.time.ZonedDateTime")) {
+                yield "(row.getCell(colIndex).asDate().atZone(java.time.ZoneId.systemDefault()));";
+              }
+              yield "(row.getCell(colIndex).getText());";
+            }
+            default -> "(row.getCell(colIndex).getText());";
+          };
           readConverterCases
               .append("case \"")
               .append(name)
               .append("\" -> entity.")
               .append(property.setter.getSimpleName().toString())
-              .append("(row.getCell(colIndex).getText());\n            ");
+              .append(cellValueGetter)
+              .append("\n            ");
         }
         if (property.getter != null
           && typeUtils.isSameType(property.getter.getReturnType(), property.type)
