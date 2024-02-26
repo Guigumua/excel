@@ -6,11 +6,11 @@ import com.github.guigumua.annotation.ExcelEntity;
 @ExcelEntity
 public class City {
   private String name;
-  private String address;
+  private Address address;
   private int intNum;
   private long longNum;
   private char ch;
-
+  @ExcelColumn.Ignore
   public char getCh() {
     return ch;
   }
@@ -35,12 +35,11 @@ public class City {
     this.longNum = longNum;
   }
 
-  @ExcelColumn(name = "haha")
-  public String getAddress() {
+  public Address getAddress() {
     return address;
   }
-  // @ExcelColumn(name = "haha")
-  public void setAddress(String address) {
+
+  public void setAddress(Address address) {
     this.address = address;
   }
 

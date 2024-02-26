@@ -14,8 +14,8 @@ dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter")
     annotationProcessor(project(":excel-apt"))
     compileOnly(project(":excel-apt"))
-    implementation("org.dhatim:fastexcel:0.16.4")
-    implementation("org.dhatim:fastexcel-reader:0.16.4")
+    implementation("org.dhatim:fastexcel:0.17.0")
+    implementation("org.dhatim:fastexcel-reader:0.17.0")
     implementation(project(":excel-runtime"))
 }
 
