@@ -8,9 +8,8 @@ import java.time.LocalDate;
 @ExcelEntity
 public record User(
     @ExcelColumn(value = "username") String name,
-    @ExcelColumn(flat = true)
     City city,
-    @ExcelColumn.Ignore LocalDate birthday) {
+    LocalDate birthday) {
   public User {
     if (name == null) {
       throw new IllegalArgumentException("name is null");

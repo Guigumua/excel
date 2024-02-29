@@ -20,35 +20,7 @@ public @interface ExcelColumn {
 
   boolean flat() default false;
 
-  Class<?> converter() default Object.class;
-  
-  ExcelColumn DEFAULT =
-      new ExcelColumn() {
-        @Override
-        public String value() {
-          return "";
-        }
-
-        @Override
-        public int order() {
-          return Integer.MAX_VALUE;
-        }
-
-        @Override
-        public Class<ExcelColumn> annotationType() {
-          return ExcelColumn.class;
-        }
-
-        @Override
-        public boolean flat() {
-          return false;
-        }
-
-        @Override
-        public Class<?> converter() {
-          return Object.class;
-        }
-      };
-
+  @Retention(RetentionPolicy.SOURCE)
+  @Target({ElementType.METHOD, ElementType.FIELD, ElementType.RECORD_COMPONENT, ElementType.PARAMETER})
   @interface Ignore {}
 }

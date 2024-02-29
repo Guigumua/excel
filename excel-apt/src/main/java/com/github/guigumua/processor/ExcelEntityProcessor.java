@@ -1,21 +1,20 @@
 package com.github.guigumua.processor;
 
-import com.github.guigumua.annotation.Converter;
 import com.github.guigumua.annotation.ExcelColumn;
 import com.github.guigumua.annotation.ExcelConstructor;
+import com.github.guigumua.annotation.ExcelConverter;
 import com.github.guigumua.annotation.ExcelEntity;
+import com.github.guigumua.excel.DefaultWriteConverter;
 import com.github.guigumua.metadata.ConverterMetadata;
 import com.github.guigumua.metadata.Metadata;
 import com.github.guigumua.metadata.Properties;
 import com.github.guigumua.metadata.Property;
+import com.github.guigumua.util.AnnotationUtil;
 import com.google.auto.service.AutoService;
-import org.dhatim.fastexcel.reader.Cell;
-import org.jetbrains.annotations.NotNull;
 
-import java.lang.annotation.Annotation;
-import java.lang.reflect.Proxy;
 import java.util.*;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import javax.annotation.processing.*;
 import javax.lang.model.SourceVersion;
@@ -24,6 +23,9 @@ import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
+import lombok.Builder;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 @AutoService(Processor.class)
 @SupportedAnnotationTypes({
@@ -40,8 +42,15 @@ public class ExcelEntityProcessor extends AbstractProcessor {
 
   private Filer filer;
 
-  private final Map<String, Metadata> metadataCache = new HashMap<>();
-  private final Map<String, ConverterMetadata> converterMetadataCache = new HashMap<>();
+  private TypeElement defaultReadConverterType;
+  private TypeElement defaultWriteConverterType;
+
+  private TypeElement readConverterInterfaceType;
+  private TypeElement writeConverterInterfaceType;
+
+  private ExecutableElement readConverterInterfaceMethod;
+  private ExecutableElement writeConverterInterfaceMethod;
+  private SequencedSet<String> inResolvedTypes = new LinkedHashSet<>();
 
   @Override
   public synchronized void init(ProcessingEnvironment processingEnvironment) {
@@ -50,9 +59,33 @@ public class ExcelEntityProcessor extends AbstractProcessor {
     messager = processingEnvironment.getMessager();
     filer = processingEnvironment.getFiler();
     typeUtils = processingEnvironment.getTypeUtils();
+    defaultReadConverterType =
+        elementUtils.getTypeElement("com.github.guigumua.excel.DefaultReadConverter");
+    defaultWriteConverterType =
+        elementUtils.getTypeElement("com.github.guigumua.excel.DefaultWriteConverter");
+    readConverterInterfaceType =
+        elementUtils.getTypeElement("com.github.guigumua.excel.ReadConverter");
+    writeConverterInterfaceType =
+        elementUtils.getTypeElement("com.github.guigumua.excel.WriteConverter");
+    readConverterInterfaceMethod =
+        readConverterInterfaceType.getEnclosedElements().stream()
+            .filter(e -> e.getKind() == ElementKind.METHOD)
+            .map(ExecutableElement.class::cast)
+            .filter(e -> e.getSimpleName().contentEquals("convert"))
+            .findFirst()
+            .orElseThrow(() -> new IllegalStateException("can not find method convert"));
+    writeConverterInterfaceMethod =
+        writeConverterInterfaceType.getEnclosedElements().stream()
+            .filter(e -> e.getKind() == ElementKind.METHOD)
+            .map(ExecutableElement.class::cast)
+            .filter(e -> e.getSimpleName().contentEquals("convert"))
+            .findFirst()
+            .orElseThrow(() -> new IllegalStateException("can not find method convert"));
   }
 
-  private void resolveMetadata(SequencedSet<String> inResolvedTypes, TypeElement type) {
+  private final Map<String, Metadata> metadataCache = new HashMap<>();
+
+  private void resolveMetadata(TypeElement type) {
     var qualifiedName = type.getQualifiedName().toString();
     if (metadataCache.containsKey(qualifiedName)) return;
     var excelEntity = type.getAnnotation(ExcelEntity.class);
@@ -80,10 +113,11 @@ public class ExcelEntityProcessor extends AbstractProcessor {
             .collect(Collectors.toMap(e -> e.getSimpleName().toString(), Function.identity()));
     var getters = new Properties();
     var setters = new Properties();
+    var converters = new ArrayList<ConverterMetadata>();
     var isRecordType = type.getKind() == ElementKind.RECORD;
     if (isRecordType) {
-      resolveRecordGetters(inResolvedTypes, type, members.get(ElementKind.METHOD), fields, getters);
-      resolveRecordSetters(inResolvedTypes, type, fields, constructor, setters);
+      resolveRecordGetters(type, members.get(ElementKind.METHOD), fields, getters, converters);
+      resolveRecordSetters(type, fields, constructor, setters, converters);
     } else {
       members.get(ElementKind.METHOD).stream()
           .map(ExecutableElement.class::cast)
@@ -94,14 +128,14 @@ public class ExcelEntityProcessor extends AbstractProcessor {
                 if (!method.getModifiers().contains(Modifier.PUBLIC)) return;
                 var propertyName = Character.toLowerCase(name.charAt(3)) + name.substring(4);
                 if (name.startsWith("get")) {
-                  resolveGetter(inResolvedTypes, type, method, name, fields, propertyName, getters);
+                  resolveGetter(type, method, name, fields, propertyName, getters, converters);
                 } else if (name.startsWith("set")) {
-                  resolveSetter(inResolvedTypes, type, method, name, fields, propertyName, setters);
+                  resolveSetter(type, method, name, fields, propertyName, setters, converters);
                 }
               });
     }
     metadataCache.put(
-        qualifiedName, new Metadata(type, constructor, getters, setters, isRecordType));
+        qualifiedName, new Metadata(type, constructor, getters, setters, isRecordType, converters));
     inResolvedTypes.removeLast();
   }
 
@@ -132,11 +166,11 @@ public class ExcelEntityProcessor extends AbstractProcessor {
   }
 
   private void resolveRecordSetters(
-      SequencedSet<String> inResolvedTypes,
       TypeElement type,
       Map<String, VariableElement> fields,
       ExecutableElement constructor,
-      Properties setters) {
+      Properties setters,
+      List<ConverterMetadata> converters) {
     var parameters = constructor.getParameters();
     for (var parameter : parameters) {
       if (parameter.getAnnotation(ExcelColumn.Ignore.class) != null) {
@@ -153,105 +187,27 @@ public class ExcelEntityProcessor extends AbstractProcessor {
       if (fieldType.getAnnotation(ExcelColumn.Ignore.class) != null) {
         continue;
       }
-      var excelColumn =
-          mergerAnnotation(
-              ExcelColumn.class,
-              parameter.getAnnotation(ExcelColumn.class),
-              field.getAnnotation(ExcelColumn.class));
-      var useConverter = false;
-      if (excelColumn.converter() != Object.class) {
-        useConverter = true;
-        resolveConverterMetadata(excelColumn);
-      }
-      var propertyBuilder = Property.builder();
-      var isInternalType = isInternalType(fieldType);
-      if (useConverter) {
-        var converterMetadata = converterMetadataCache.get(excelColumn.converter().getTypeName());
-        if (converterMetadata == null) throw new IllegalStateException("converter not found");
-        var converter =
-            converterMetadata.methods().get("(" + Cell.class.getTypeName() + ")->" + fieldType);
-        if (converter == null) {
-          throw new IllegalStateException(
-              "converter method not found for %s->%s in class %s"
-                  .formatted(
-                      excelColumn.converter().getTypeName(), Cell.class.getTypeName(), fieldType));
-        }
-        propertyBuilder.converter(converter);
-      } else if (isInternalType && excelColumn.flat()) {
-        throw new IllegalStateException(
-            "field %s is internal type, but flat is true, it is not supported".formatted(name));
-      }
-      var width = 1;
-      var height = 1;
-      var subProperties = new Properties();
-      if (!isInternalType) {
-        var fieldTypeElement = (TypeElement) typeUtils.asElement(fieldType);
-        resolveMetadata(inResolvedTypes, fieldTypeElement);
-        var properties =
-            metadataCache.get(fieldTypeElement.getQualifiedName().toString()).setters();
-        if (excelColumn.flat()) {
-          height = 0;
-        }
-        width = properties.getWidth();
-        subProperties = properties;
-      }
+      var propertyBuilder = resolveSetters(fieldType, name, parameter, field, converters);
       var property =
           propertyBuilder
               .classType(type)
               .name(name)
               .method(null)
-              .type(fieldType)
-              .order(excelColumn.order())
-              .columnName(excelColumn.value().isBlank() ? name : excelColumn.value())
-              .isInternal(isInternalType)
               .isGetter(false)
               .primitive(fieldType.getKind().isPrimitive())
-              .width(width)
-              .height(height)
-              .subProperties(subProperties)
               .build();
       setters.add(property);
     }
   }
 
-  private void resolveConverterMetadata(@NotNull ExcelColumn excelColumn) {
-    var converterTypeName = excelColumn.converter().getTypeName();
-    var converterClassType = elementUtils.getTypeElement(converterTypeName);
-    if (converterClassType == null) {
-      throw new IllegalStateException("converter class %s not found".formatted(converterTypeName));
-    }
-    if (converterMetadataCache.containsKey(converterTypeName)) {
-      return;
-    }
-    var methods =
-        elementUtils.getAllMembers(converterClassType).stream()
-            .filter(e -> e.getKind() == ElementKind.METHOD)
-            .filter(e -> e.getAnnotation(Converter.class) != null)
-            .map(ExecutableElement.class::cast)
-            .filter(e -> e.getParameters().size() == 1)
-            .filter(e -> e.getReturnType().getKind() != TypeKind.VOID)
-            .collect(Collectors.toMap(ExcelEntityProcessor::signature, Function.identity()));
-    var converterMetadata = new ConverterMetadata(converterClassType, methods);
-    converterMetadataCache.put(converterTypeName, converterMetadata);
-  }
-
-  @NotNull
-  private static String signature(ExecutableElement method) {
-    return method.getParameters().stream()
-            .map(p -> p.asType().toString())
-            .collect(Collectors.joining(",", "(", ")"))
-        + "->"
-        + method.getReturnType().toString();
-  }
-
   private void resolveSetter(
-      SequencedSet<String> inResolvedTypes,
       TypeElement type,
       ExecutableElement method,
       String name,
       Map<String, VariableElement> fields,
       String propertyName,
-      Properties setters) {
+      Properties setters,
+      List<ConverterMetadata> converters) {
     if (method.getParameters().size() != 1) return;
     var parameterType = method.getParameters().getFirst().asType();
     if (method.getAnnotation(ExcelColumn.Ignore.class) != null) {
@@ -262,60 +218,61 @@ public class ExcelEntityProcessor extends AbstractProcessor {
     if (field != null && field.getAnnotation(ExcelColumn.Ignore.class) != null) {
       return;
     }
-    var excelColumn =
-        mergerAnnotation(
-            ExcelColumn.class,
-            method.getAnnotation(ExcelColumn.class),
-            Optional.ofNullable(field)
-                .map(e -> e.getAnnotation(ExcelColumn.class))
-                .orElse(ExcelColumn.DEFAULT));
-    var isInternalType = isInternalType(parameterType);
-    if (isInternalType && excelColumn.flat()) {
-      throw new IllegalStateException(
-          "field %s is internal type, but flat is true, it is not supported"
-              .formatted(propertyName));
-    }
-    var width = 1;
-    var height = 1;
-    var subProperties = new Properties();
-    if (!isInternalType) {
-      var typeElement = (TypeElement) typeUtils.asElement(parameterType);
-      resolveMetadata(inResolvedTypes, typeElement);
-      var properties = metadataCache.get(typeElement.getQualifiedName().toString()).setters();
-      if (excelColumn.flat()) {
-        height = 0;
-      }
-      width = properties.getWidth();
-      subProperties = properties;
-    }
+    var propertyBuilder = resolveSetters(parameterType, propertyName, method, field, converters);
 
     var property =
-        Property.builder()
+        propertyBuilder
             .classType(type)
             .name(name)
             .method(method)
-            .type(parameterType)
-            .order(excelColumn.order())
-            .columnName(excelColumn.value().isBlank() ? propertyName : excelColumn.value())
-            .isInternal(isInternalType)
             .directly(false)
             .primitive(parameterType.getKind().isPrimitive())
             .isGetter(false)
-            .width(width)
-            .height(height)
-            .subProperties(subProperties)
             .build();
     setters.add(property);
   }
 
+  private Property.PropertyBuilder resolveSetters(
+      TypeMirror type,
+      String propertyName,
+      Element primary,
+      Element minor,
+      List<ConverterMetadata> converters) {
+    var excelColumn = mergeExcelColumn(primary, minor);
+    var isInternalType = isInternalType(type);
+    var flatted = excelColumn.flat();
+    if (isInternalType && flatted) {
+      throw new IllegalStateException(
+          "field %s is internal type, but flat is true, it is not supported"
+              .formatted(propertyName));
+    }
+    var propertyBuilder = Property.builder();
+    if (!isInternalType) {
+      var typeElement = (TypeElement) typeUtils.asElement(type);
+      resolveMetadata(typeElement);
+      var properties = metadataCache.get(typeElement.getQualifiedName().toString()).setters();
+      propertyBuilder
+          .height(flatted ? 0 : 1)
+          .width(properties.getWidth())
+          .subProperties(properties);
+    } else {
+      propertyBuilder.width(1).height(1).subProperties(new Properties());
+    }
+    return propertyBuilder
+        .type(type)
+        .order(excelColumn.order())
+        .isInternal(isInternalType)
+        .columnName(excelColumn.value().isBlank() ? propertyName : excelColumn.value());
+  }
+
   private void resolveGetter(
-      SequencedSet<String> inResolvedTypes,
       TypeElement type,
       ExecutableElement method,
       String name,
       Map<String, VariableElement> fields,
       String propertyName,
-      Properties getters) {
+      Properties getters,
+      List<ConverterMetadata> converters) {
     if (name.equals("getClass")) return;
     if (!method.getParameters().isEmpty()) return;
     if (method.getAnnotation(ExcelColumn.Ignore.class) != null) {
@@ -326,57 +283,83 @@ public class ExcelEntityProcessor extends AbstractProcessor {
     if (field != null && field.getAnnotation(ExcelColumn.Ignore.class) != null) {
       return;
     }
-    var excelColumn =
-        mergerAnnotation(
-            ExcelColumn.class,
-            method.getAnnotation(ExcelColumn.class),
-            Optional.ofNullable(field)
-                .map(e -> e.getAnnotation(ExcelColumn.class))
-                .orElse(ExcelColumn.DEFAULT));
-    var isInternalType = isInternalType(returnType);
-    if (isInternalType && excelColumn.flat()) {
-      throw new IllegalStateException(
-          "field %s is internal type, but flat is true, it is not supported"
-              .formatted(propertyName));
-    }
-    var width = 1;
-    var height = 1;
-    var subProperties = new Properties();
-    if (!isInternalType) {
-      var typeElement = (TypeElement) typeUtils.asElement(returnType);
-      resolveMetadata(inResolvedTypes, typeElement);
-      var properties = metadataCache.get(typeElement.getQualifiedName().toString()).getters();
-      if (excelColumn.flat()) {
-        height = 0;
-      }
-      width = properties.getWidth();
-      subProperties = properties;
-    }
+    var propertyBuilder = resolveGetters(propertyName, returnType, method, field, converters);
     var property =
-        Property.builder()
+        propertyBuilder
             .classType(type)
             .name(name)
             .method(method)
-            .type(returnType)
-            .order(excelColumn.order())
-            .columnName(excelColumn.value().isBlank() ? propertyName : excelColumn.value())
-            .isInternal(isInternalType)
             .isGetter(true)
             .directly(writeDirectly(returnType))
             .primitive(returnType.getKind().isPrimitive())
-            .width(width)
-            .height(height)
-            .subProperties(subProperties)
             .build();
     getters.add(property);
   }
 
+  private Property.PropertyBuilder resolveGetters(
+      String propertyName,
+      TypeMirror typeMirror,
+      Element primary,
+      Element minor,
+      List<ConverterMetadata> converters) {
+    var excelColumn = mergeExcelColumn(primary, minor);
+    var excelConverter = mergeExcelConverter(primary, minor);
+    var isInternalType = isInternalType(typeMirror);
+    var propertyBuilder = Property.builder();
+    var flatted = excelColumn.flat();
+    if (isInternalType && flatted) {
+      throw new IllegalStateException(
+          "field %s is internal type, but flat is true, it is not supported"
+              .formatted(propertyName));
+    }
+    if (!excelConverter.isEmpty()) {
+      var converterMetadataBuilder = ConverterMetadata.builder().reader(false);
+      if (excelConverter.writerClass.toString().equals(DefaultWriteConverter.class.getTypeName())) {
+        converterMetadataBuilder.isDefault(true).typeElement(defaultWriteConverterType);
+      } else {
+        var typeElement = (TypeElement) typeUtils.asElement(excelConverter.writerClass);
+        var method =
+            typeElement.getEnclosedElements().stream()
+                .filter(e -> e.getKind() == ElementKind.METHOD)
+                .map(ExecutableElement.class::cast)
+                .filter(
+                    e ->
+                        elementUtils.overrides(
+                            e, writeConverterInterfaceMethod, writeConverterInterfaceType))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("can not find method convert"));
+        converterMetadataBuilder.typeElement(typeElement).method(method);
+      }
+      var converterMetadata = converterMetadataBuilder.build();
+      propertyBuilder.hasConverter(true).converterMetadata(converterMetadata);
+      propertyBuilder.height(1).width(1).subProperties(new Properties());
+      converters.add(converterMetadata);
+    } else {
+      if (!isInternalType) {
+        var typeElement = (TypeElement) typeUtils.asElement(typeMirror);
+        resolveMetadata(typeElement);
+        var subMetadata = metadataCache.get(typeElement.getQualifiedName().toString());
+        var properties = subMetadata.getters();
+        propertyBuilder.width(properties.getWidth()).subProperties(properties);
+        propertyBuilder.height(flatted ? 0 : 1);
+      } else {
+        propertyBuilder.height(1).width(1).subProperties(new Properties());
+      }
+    }
+    propertyBuilder
+        .type(typeMirror)
+        .order(excelColumn.order())
+        .columnName(excelColumn.value().isBlank() ? propertyName : excelColumn.value())
+        .isInternal(isInternalType);
+    return propertyBuilder;
+  }
+
   private void resolveRecordGetters(
-      SequencedSet<String> inResolvedTypes,
       TypeElement type,
       List<? extends Element> methods,
       Map<String, VariableElement> fields,
-      Properties getters) {
+      Properties getters,
+      List<ConverterMetadata> converters) {
     methods.stream()
         .map(ExecutableElement.class::cast)
         .filter(method -> method.getAnnotation(ExcelColumn.Ignore.class) == null)
@@ -396,73 +379,92 @@ public class ExcelEntityProcessor extends AbstractProcessor {
               if (field.getAnnotation(ExcelColumn.Ignore.class) != null) {
                 return;
               }
-              var excelColumn =
-                  mergerAnnotation(
-                      ExcelColumn.class,
-                      method.getAnnotation(ExcelColumn.class),
-                      field.getAnnotation(ExcelColumn.class));
               var fieldType = field.asType();
-              var isInternalType = isInternalType(fieldType);
-              if (isInternalType && excelColumn.flat()) {
-                throw new IllegalStateException(
-                    "field %s is internal type, but flat is true, it is not supported"
-                        .formatted(name));
-              }
-              var width = 1;
-              var height = 1;
-              var subProperties = new Properties();
-              if (!isInternalType) {
-                var typeElement = (TypeElement) typeUtils.asElement(fieldType);
-                resolveMetadata(inResolvedTypes, typeElement);
-                var properties =
-                    metadataCache.get(typeElement.getQualifiedName().toString()).getters();
-                if (excelColumn.flat()) {
-                  height = 0;
-                }
-                width = properties.getWidth();
-                subProperties = properties;
-              }
+              var propertyBuilder = resolveGetters(name, fieldType, method, field, converters);
               var property =
-                  Property.builder()
+                  propertyBuilder
                       .classType(type)
                       .name(name)
                       .method(method)
-                      .type(fieldType)
-                      .order(excelColumn.order())
-                      .columnName(excelColumn.value().isBlank() ? name : excelColumn.value())
-                      .isInternal(isInternalType)
                       .directly(writeDirectly(fieldType))
                       .isGetter(true)
                       .primitive(fieldType.getKind().isPrimitive())
-                      .width(width)
-                      .height(height)
-                      .subProperties(subProperties)
                       .build();
               getters.add(property);
             });
   }
 
+  record ExcelColumnData(String value, int order, boolean flat) {
+    @Builder
+    ExcelColumnData {}
+  }
+
+  record ExcelConverterData(TypeMirror writerClass, TypeMirror readerClass) {
+    @Builder
+    ExcelConverterData {}
+
+    boolean isEmpty() {
+      return writerClass == null && readerClass == null;
+    }
+
+    boolean isDefaultWriter() {
+      return "com.github.guigumua.excel.DefaultWriteConverter".equals(String.valueOf(writerClass));
+    }
+
+    boolean isDefaultReader() {
+      return "com.github.guigumua.excel.DefaultReadConverter".equals(String.valueOf(readerClass));
+    }
+
+    boolean hasWriter() {
+      return writerClass != null;
+    }
+
+    boolean hasReader() {
+      return readerClass != null;
+    }
+  }
+
+  private ExcelConverterData mergeExcelConverter(
+      @NotNull Element element1, @Nullable Element element2) {
+    var builder = ExcelConverterData.builder();
+    var opt1 = Optional.ofNullable(element1.getAnnotation(ExcelConverter.class));
+    var opt2 = Optional.ofNullable(element2).map(e -> e.getAnnotation(ExcelConverter.class));
+    builder.writerClass(
+        opt1.map(e -> AnnotationUtil.getTypeMirror(e::writer))
+            .orElse(opt2.map(e -> AnnotationUtil.getTypeMirror(e::writer)).orElse(null)));
+    builder.readerClass(
+        opt1.map(e -> AnnotationUtil.getTypeMirror(e::reader))
+            .orElse(opt2.map(e -> AnnotationUtil.getTypeMirror(e::reader)).orElse(null)));
+    return builder.build();
+  }
+
   @SuppressWarnings({"unchecked", "rawtypes", "RedundantSuppression", "SameParameterValue"})
-  private static <T extends Annotation> T mergerAnnotation(Class<T> clazz, T first, T second) {
-    return (T)
-        Proxy.newProxyInstance(
-            clazz.getClassLoader(),
-            new Class[] {clazz},
-            (proxy, method, args) -> {
-              if (method.getName().equals("annotationType")) {
-                return clazz;
-              }
-              var firstValue = first == null ? method.getDefaultValue() : method.invoke(first);
-              var secondValue = second == null ? method.getDefaultValue() : method.invoke(second);
-              var defaultValue = method.getDefaultValue();
-              if (!Objects.equals(firstValue, defaultValue)) {
-                return firstValue;
-              }
-              if (!Objects.equals(secondValue, defaultValue)) {
-                return secondValue;
-              }
-              return defaultValue;
-            });
+  private ExcelColumnData mergeExcelColumn(@NotNull Element element1, @Nullable Element element2) {
+    return mergeExcelColumn(
+        element1.getAnnotation(ExcelColumn.class),
+        Optional.ofNullable(element2).map(e -> e.getAnnotation(ExcelColumn.class)).orElse(null));
+  }
+
+  @SuppressWarnings({"unchecked", "rawtypes", "RedundantSuppression", "SameParameterValue"})
+  private ExcelColumnData mergeExcelColumn(
+      @Nullable ExcelColumn first, @Nullable ExcelColumn second) {
+    var builder = ExcelColumnData.builder();
+    var firstOpt = Optional.ofNullable(first);
+    var secondOpt = Optional.ofNullable(second);
+    builder
+        .value(
+            firstOpt
+                .map(ExcelColumn::value)
+                .filter(Predicate.not(String::isBlank))
+                .orElse(secondOpt.map(ExcelColumn::value).orElse("")))
+        .order(
+            firstOpt
+                .map(ExcelColumn::order)
+                .filter(o -> o != Integer.MAX_VALUE)
+                .orElse(secondOpt.map(ExcelColumn::order).orElse(Integer.MAX_VALUE)))
+        .flat(
+            firstOpt.map(ExcelColumn::flat).orElse(secondOpt.map(ExcelColumn::flat).orElse(false)));
+    return builder.build();
   }
 
   private static boolean isFieldOrMethodOrConstructor(Element e) {
@@ -546,9 +548,8 @@ public class ExcelEntityProcessor extends AbstractProcessor {
     }
 
     var annotatedTypes = roundEnv.getElementsAnnotatedWith(ExcelEntity.class);
-    var inResolvedTypes = new LinkedHashSet<String>();
     for (Element annotatedType : annotatedTypes) {
-      resolveMetadata(inResolvedTypes, (TypeElement) annotatedType);
+      resolveMetadata((TypeElement) annotatedType);
     }
 
     FileGenerator fileGenerator = new FileGenerator(metadataCache, elementUtils, typeUtils, filer);

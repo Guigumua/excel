@@ -21,7 +21,8 @@ public record Property(
     Properties subProperties,
     boolean directly,
     boolean primitive,
-    ExecutableElement converter) {
+    ConverterMetadata converterMetadata,
+    boolean hasConverter) {
   @Builder
   public Property {}
 }

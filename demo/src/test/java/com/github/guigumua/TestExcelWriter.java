@@ -6,6 +6,8 @@ import java.io.IOException;
 import java.time.LocalDate;
 import java.util.random.RandomGenerator;
 import java.util.stream.Stream;
+
+import org.dhatim.fastexcel.Workbook;
 import org.junit.jupiter.api.Test;
 
 public class TestExcelWriter {
@@ -18,6 +20,7 @@ public class TestExcelWriter {
   @Test
   public void testUserConverter() throws IOException {
     var generator = RandomGenerator.getDefault();
+    var l = System.currentTimeMillis();
     try (var workbook =
         Stream.generate(
                 () -> {
@@ -35,7 +38,27 @@ public class TestExcelWriter {
                       city,
                       LocalDate.now().minusDays(generator.nextInt(10000)));
                 })
-            .limit(100)
+            .limit(10)
             .collect(UserConverter.collectorOf(new FileOutputStream("user.xlsx")))) {}
+    // var workbook = Stream.generate(() -> {
+    //   var city = new City();
+    //   var address = new Address();
+    //   city.setAddress(address);
+    //   address.setLocate("locate" + generator.nextInt(100));
+    //   address.setName("name" + generator.nextInt(100));
+    //   city.setCh(((char) generator.nextInt(65, 120)));
+    //   city.setName("name" + generator.nextInt(100));
+    //   city.setIntNum(generator.nextInt(100));
+    //   city.setLongNum(generator.nextLong());
+    //   return city;
+    // }).limit(100).collect(CityConverter.collectorOf(new FileOutputStream("city.xlsx")));
+    // workbook.finish();
+    // var workbook2 = Stream.generate(() -> {
+    //   var address = new Address();
+    //   address.setLocate("locate" + generator.nextInt(100));
+    //   address.setName("name" + generator.nextInt(100));
+    //   return address;
+    // }).limit(100).collect(AddressConverter.collectorOf(new FileOutputStream("address.xlsx")));
+    // workbook2.finish();
   }
 }

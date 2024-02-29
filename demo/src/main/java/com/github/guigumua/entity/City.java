@@ -1,13 +1,21 @@
 package com.github.guigumua.entity;
 
 import com.github.guigumua.annotation.ExcelColumn;
+import com.github.guigumua.annotation.ExcelConverter;
 import com.github.guigumua.annotation.ExcelEntity;
+import com.github.guigumua.entity.converter.AddPrefixConverter;
+import com.github.guigumua.excel.ToStringConverter;
+
+import java.util.Objects;
 
 @ExcelEntity
 public class City {
   private String name;
+  @ExcelConverter
   private Address address;
+  @ExcelConverter(writer = AddPrefixConverter.class)
   private int intNum;
+  @ExcelConverter(writer = ToStringConverter.class)
   private long longNum;
   private char ch;
   @ExcelColumn.Ignore

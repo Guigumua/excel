@@ -12,8 +12,8 @@ repositories {
 dependencies {
     testImplementation(platform("org.junit:junit-bom:5.9.1"))
     testImplementation("org.junit.jupiter:junit-jupiter")
-    implementation("org.dhatim:fastexcel:0.17.0")
-    implementation("org.dhatim:fastexcel-reader:0.17.0")
+    compileOnly("org.dhatim:fastexcel:0.17.0")
+    compileOnly("org.dhatim:fastexcel-reader:0.17.0")
     compileOnly("org.jetbrains:annotations:22.0.0")
     compileOnly("org.projectlombok:lombok:1.18.30")
 }
