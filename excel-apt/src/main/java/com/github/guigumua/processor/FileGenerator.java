@@ -286,12 +286,18 @@ public class FileGenerator {
            static void writeRow(Worksheet sheet, int x, int y, %s entity) {
          %s
            }
+
+           static %s readRow(Row row, int offset) {
+         %s
+           }
          """
         .formatted(
             entityClassName,
             entityClassName,
             entityClassName,
-            generateWriteRowBody(metadata.getters()));
+            generateWriteRowBody(metadata.getters()),
+            entityClassName,
+            generateReadRowBody(metadata));
   }
 
   private String generateImporter(String entityClassName, Metadata metadata) {
@@ -304,7 +310,7 @@ public class FileGenerator {
               }
 
               protected %s readEntity(Row row) {
-                return null;
+                return readRow(row, 0);
               }
 
               @Override
@@ -319,5 +325,91 @@ public class FileGenerator {
             }
           """
         .formatted(entityClassName, entityClassName, entityClassName);
+  }
+
+  private String generateReadRowBody(Metadata metadata) {
+    if (metadata.isRecord()) {
+      return """
+              return new %s(%s);
+          """
+          .formatted(
+              metadata.entityType().toString(),
+              metadata.setters().stream()
+                  .map(this::wrapReadCellValue)
+                  .collect(Collectors.joining(",")));
+    } else {
+      return """
+              var entity = new %s();
+          %s
+              return entity;
+          """
+          .formatted(
+              metadata.entityType().toString(), generateReadEntitySetters(metadata.setters()));
+    }
+  }
+
+  private String generateReadEntitySetters(Properties properties) {
+    return properties.stream()
+        .map(
+            property -> {
+              if (property.subProperties().isEmpty()) {
+                return """
+              entity.%s(%s);
+          """
+                    .formatted(property.name(), wrapReadCellValue(property));
+              }
+              return """
+              entity.%s(%s.readRow(row, offset));
+          """
+                  .formatted(property.name(), property.type().toString() + "Converter");
+            })
+        .collect(Collectors.joining());
+  }
+
+  private String wrapReadCellValue(Property property) {
+    if (property.hasConverter() && !property.converterMetadata().isDefault()) {
+      var converterMetadata = property.converterMetadata();
+      return """
+            %s_CONVERTER.convert(row.getCell(offset++))
+        """
+          .formatted(
+              camelCaseToUpperCase(converterMetadata.typeElement().getSimpleName().toString()));
+    }
+    var typeName = property.type().toString();
+    switch (typeName) {
+      case "java.lang.String" -> {
+        return "row.getCell(offset++).asString()";
+      }
+      case "java.lang.Boolean", "boolean" -> {
+        return "row.getCell(offset++).asBoolean()";
+      }
+      case "java.lang.Integer", "int" -> {
+        return "row.getCell(offset++).asNumber().intValue()";
+      }
+      case "java.lang.Long", "long" -> {
+        return "row.getCell(offset++).asNumber().longValue()";
+      }
+      case "java.lang.Float", "float" -> {
+        return "row.getCell(offset++).asNumber().floatValue()";
+      }
+      case "java.lang.Double", "double" -> {
+        return "row.getCell(offset++).asNumber().doubleValue()";
+      }
+      case "java.time.LocalDateTime" -> {
+        return "row.getCell(offset++).asDate()";
+      }
+      case "java.time.LocalDate" -> {
+        return "row.getCell(offset++).asDate().toLocalDate()";
+      }
+      case "java.lang.Character", "char" -> {
+        return "row.getCell(offset++).getText().charAt(0)";
+      }
+      default -> {
+        if (!property.isInternal()) {
+          return property.type() + "Converter.readRow(row, offset)";
+        }
+        throw new IllegalArgumentException("Unsupported type: " + typeName);
+      }
+    }
   }
 }

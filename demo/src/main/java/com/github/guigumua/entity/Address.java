@@ -21,4 +21,9 @@ public class Address {
   public void setLocate(String locate) {
     this.locate = locate;
   }
+
+  @Override
+  public String toString() {
+    return "Address{" + "name='" + name + '\'' + ", locate='" + locate + '\'' + '}';
+  }
 }

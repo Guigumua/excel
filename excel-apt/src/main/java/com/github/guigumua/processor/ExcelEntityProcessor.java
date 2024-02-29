@@ -4,7 +4,6 @@ import com.github.guigumua.annotation.ExcelColumn;
 import com.github.guigumua.annotation.ExcelConstructor;
 import com.github.guigumua.annotation.ExcelConverter;
 import com.github.guigumua.annotation.ExcelEntity;
-import com.github.guigumua.excel.DefaultWriteConverter;
 import com.github.guigumua.metadata.ConverterMetadata;
 import com.github.guigumua.metadata.Metadata;
 import com.github.guigumua.metadata.Properties;
@@ -239,6 +238,7 @@ public class ExcelEntityProcessor extends AbstractProcessor {
       Element minor,
       List<ConverterMetadata> converters) {
     var excelColumn = mergeExcelColumn(primary, minor);
+    var excelConverter = mergeExcelConverter(primary, minor);
     var isInternalType = isInternalType(type);
     var flatted = excelColumn.flat();
     if (isInternalType && flatted) {
@@ -247,16 +247,40 @@ public class ExcelEntityProcessor extends AbstractProcessor {
               .formatted(propertyName));
     }
     var propertyBuilder = Property.builder();
-    if (!isInternalType) {
-      var typeElement = (TypeElement) typeUtils.asElement(type);
-      resolveMetadata(typeElement);
-      var properties = metadataCache.get(typeElement.getQualifiedName().toString()).setters();
-      propertyBuilder
-          .height(flatted ? 0 : 1)
-          .width(properties.getWidth())
-          .subProperties(properties);
+    if (excelConverter.hasReader()) {
+      var converterMetadataBuilder = ConverterMetadata.builder().reader(true);
+      if (excelConverter.isDefaultReader()) {
+        converterMetadataBuilder.isDefault(true).typeElement(defaultReadConverterType);
+      } else {
+        var typeElement = (TypeElement) typeUtils.asElement(excelConverter.readerClass);
+        var method =
+            typeElement.getEnclosedElements().stream()
+                .filter(e -> e.getKind() == ElementKind.METHOD)
+                .map(ExecutableElement.class::cast)
+                .filter(
+                    e ->
+                        elementUtils.overrides(
+                            e, readConverterInterfaceMethod, readConverterInterfaceType))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("can not find method convert"));
+        converterMetadataBuilder.typeElement(typeElement).method(method);
+      }
+      var converterMetadata = converterMetadataBuilder.build();
+      propertyBuilder.hasConverter(true).converterMetadata(converterMetadata);
+      propertyBuilder.height(1).width(1).subProperties(new Properties());
+      converters.add(converterMetadata);
     } else {
-      propertyBuilder.width(1).height(1).subProperties(new Properties());
+      if (!isInternalType) {
+        var typeElement = (TypeElement) typeUtils.asElement(type);
+        resolveMetadata(typeElement);
+        var properties = metadataCache.get(typeElement.getQualifiedName().toString()).setters();
+        propertyBuilder
+            .height(flatted ? 0 : 1)
+            .width(properties.getWidth())
+            .subProperties(properties);
+      } else {
+        propertyBuilder.width(1).height(1).subProperties(new Properties());
+      }
     }
     return propertyBuilder
         .type(type)
@@ -312,9 +336,9 @@ public class ExcelEntityProcessor extends AbstractProcessor {
           "field %s is internal type, but flat is true, it is not supported"
               .formatted(propertyName));
     }
-    if (!excelConverter.isEmpty()) {
+    if (excelConverter.hasWriter()) {
       var converterMetadataBuilder = ConverterMetadata.builder().reader(false);
-      if (excelConverter.writerClass.toString().equals(DefaultWriteConverter.class.getTypeName())) {
+      if (excelConverter.isDefaultWriter()) {
         converterMetadataBuilder.isDefault(true).typeElement(defaultWriteConverterType);
       } else {
         var typeElement = (TypeElement) typeUtils.asElement(excelConverter.writerClass);
@@ -402,10 +426,6 @@ public class ExcelEntityProcessor extends AbstractProcessor {
   record ExcelConverterData(TypeMirror writerClass, TypeMirror readerClass) {
     @Builder
     ExcelConverterData {}
-
-    boolean isEmpty() {
-      return writerClass == null && readerClass == null;
-    }
 
     boolean isDefaultWriter() {
       return "com.github.guigumua.excel.DefaultWriteConverter".equals(String.valueOf(writerClass));
