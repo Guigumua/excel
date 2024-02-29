@@ -12,7 +12,9 @@ repositories {
 dependencies {
     testImplementation(platform("org.junit:junit-bom:5.9.1"))
     testImplementation("org.junit.jupiter:junit-jupiter")
+    annotationProcessor("org.projectlombok:lombok:1.18.30")
     annotationProcessor(project(":excel-apt"))
+    compileOnly("org.projectlombok:lombok:1.18.30")
     compileOnly(project(":excel-apt"))
     implementation("org.dhatim:fastexcel:0.17.0")
     implementation("org.dhatim:fastexcel-reader:0.17.0")

@@ -11,7 +11,6 @@ import javax.annotation.processing.Filer;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
@@ -22,7 +21,6 @@ public class FileGenerator {
   private final Elements elementUtils;
   private final Types typeUtils;
   private final Filer filer;
-  private final Map<String, String> generatedFiles = new HashMap<>();
 
   public FileGenerator(
       Map<String, Metadata> metadataCache, Elements elementUtils, Types typeUtils, Filer filer) {
@@ -66,7 +64,6 @@ public class FileGenerator {
                   generateMethods(entityClassName, metadata),
                   generateExporter(entityClassName, metadata),
                   generateImporter(entityClassName, metadata)));
-      generatedFiles.put(entityClassName, packageName + "." + converterClassName);
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
@@ -125,19 +122,21 @@ public class FileGenerator {
 
   private String generateConverterCreation(Metadata metadata) {
     return metadata.converters().stream()
-        .map(ConverterMetadata::typeElement)
-        .map(TypeElement::getSimpleName)
-        .map(Object::toString)
-        .distinct()
-        .filter(
-            s ->
-                !s.equals(DefaultReadConverter.class.getSimpleName())
-                    && !s.equals(DefaultWriteConverter.class.getSimpleName()))
+        .filter(converterMetadata -> !converterMetadata.isDefault())
         .map(
-            s ->
-                "  public static final %s %s_CONVERTER = new %s();"
-                    .formatted(s, camelCaseToUpperCase(s), s))
-        .collect(Collectors.joining(";\n"));
+            converterMetadata -> {
+              var simpleName = converterMetadata.typeElement().getSimpleName().toString();
+              return """
+          public static final %s %s_CONVERTER = new %s(%s);
+        """
+                  .formatted(
+                      simpleName,
+                      camelCaseToUpperCase(simpleName),
+                      simpleName,
+                      converterMetadata.initArguments());
+            })
+        .distinct()
+        .collect(Collectors.joining("\n"));
   }
 
   private String camelCaseToUpperCase(String s) {
@@ -159,8 +158,7 @@ public class FileGenerator {
         .toString();
   }
 
-  private String generateDefaultConverterWrite(
-      ConverterMetadata converterMetadata, Property property) {
+  private String generateDefaultConverterWrite(Property property) {
     switch (property.type().toString()) {
       case "java.lang.String",
           "java.lang.Boolean",
@@ -197,8 +195,18 @@ public class FileGenerator {
     if (property.hasConverter()) {
       var converterMetadata = property.converterMetadata();
       if (converterMetadata.isDefault()) {
-        return generateDefaultConverterWrite(converterMetadata, property);
+        return generateDefaultConverterWrite(property);
       } else {
+        if (!property.primitive()) {
+          return """
+            if(entity.%s() != null) sheet.value(y, x, %s_CONVERTER.convert(entity.%s()));
+            x++;
+        """
+              .formatted(
+                  property.name(),
+                  camelCaseToUpperCase(converterMetadata.typeElement().getSimpleName().toString()),
+                  property.name());
+        }
         return """
             sheet.value(y, x++, %s_CONVERTER.convert(entity.%s()));
         """
@@ -369,9 +377,7 @@ public class FileGenerator {
   private String wrapReadCellValue(Property property) {
     if (property.hasConverter() && !property.converterMetadata().isDefault()) {
       var converterMetadata = property.converterMetadata();
-      return """
-            %s_CONVERTER.convert(row.getCell(offset++))
-        """
+      return "%s_CONVERTER.convert(row.getCell(offset++))"
           .formatted(
               camelCaseToUpperCase(converterMetadata.typeElement().getSimpleName().toString()));
     }

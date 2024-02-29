@@ -12,7 +12,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.function.Predicate;
 
-public record ConverterMetadata(TypeElement typeElement, ExecutableElement method, boolean isDefault, boolean reader) {
+public record ConverterMetadata(TypeElement typeElement, ExecutableElement method, boolean isDefault, boolean reader, String initArguments) {
   @Builder
   public ConverterMetadata {}
 }

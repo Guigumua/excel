@@ -1,9 +1,6 @@
 package com.github.guigumua.processor;
 
-import com.github.guigumua.annotation.ExcelColumn;
-import com.github.guigumua.annotation.ExcelConstructor;
-import com.github.guigumua.annotation.ExcelConverter;
-import com.github.guigumua.annotation.ExcelEntity;
+import com.github.guigumua.annotation.*;
 import com.github.guigumua.metadata.ConverterMetadata;
 import com.github.guigumua.metadata.Metadata;
 import com.github.guigumua.metadata.Properties;
@@ -11,10 +8,12 @@ import com.github.guigumua.metadata.Property;
 import com.github.guigumua.util.AnnotationUtil;
 import com.google.auto.service.AutoService;
 
+import java.lang.annotation.Annotation;
 import java.util.*;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import javax.annotation.processing.*;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.*;
@@ -123,12 +122,17 @@ public class ExcelEntityProcessor extends AbstractProcessor {
           .forEach(
               method -> {
                 var name = method.getSimpleName().toString();
-                if (name.length() <= 4) return;
                 if (!method.getModifiers().contains(Modifier.PUBLIC)) return;
-                var propertyName = Character.toLowerCase(name.charAt(3)) + name.substring(4);
-                if (name.startsWith("get")) {
+                if (name.startsWith("get") && name.length() >= 4) {
+                  var propertyName = Character.toLowerCase(name.charAt(3)) + name.substring(4);
                   resolveGetter(type, method, name, fields, propertyName, getters, converters);
-                } else if (name.startsWith("set")) {
+                } else if (name.startsWith("is")
+                    && name.length() >= 3
+                    && method.getReturnType().getKind() == TypeKind.BOOLEAN) {
+                  var propertyName = Character.toLowerCase(name.charAt(2)) + name.substring(3);
+                  resolveGetter(type, method, name, fields, propertyName, getters, converters);
+                } else if (name.startsWith("set") && name.length() >= 4) {
+                  var propertyName = Character.toLowerCase(name.charAt(3)) + name.substring(4);
                   resolveSetter(type, method, name, fields, propertyName, setters, converters);
                 }
               });
@@ -263,7 +267,10 @@ public class ExcelEntityProcessor extends AbstractProcessor {
                             e, readConverterInterfaceMethod, readConverterInterfaceType))
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException("can not find method convert"));
-        converterMetadataBuilder.typeElement(typeElement).method(method);
+        converterMetadataBuilder
+            .initArguments(excelConverter.initArguments)
+            .typeElement(typeElement)
+            .method(method);
       }
       var converterMetadata = converterMetadataBuilder.build();
       propertyBuilder.hasConverter(true).converterMetadata(converterMetadata);
@@ -352,7 +359,10 @@ public class ExcelEntityProcessor extends AbstractProcessor {
                             e, writeConverterInterfaceMethod, writeConverterInterfaceType))
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException("can not find method convert"));
-        converterMetadataBuilder.typeElement(typeElement).method(method);
+        converterMetadataBuilder
+            .initArguments(excelConverter.initArguments)
+            .typeElement(typeElement)
+            .method(method);
       }
       var converterMetadata = converterMetadataBuilder.build();
       propertyBuilder.hasConverter(true).converterMetadata(converterMetadata);
@@ -423,7 +433,7 @@ public class ExcelEntityProcessor extends AbstractProcessor {
     ExcelColumnData {}
   }
 
-  record ExcelConverterData(TypeMirror writerClass, TypeMirror readerClass) {
+  record ExcelConverterData(TypeMirror writerClass, TypeMirror readerClass, String initArguments) {
     @Builder
     ExcelConverterData {}
 
@@ -445,32 +455,64 @@ public class ExcelEntityProcessor extends AbstractProcessor {
   }
 
   private ExcelConverterData mergeExcelConverter(
-      @NotNull Element element1, @Nullable Element element2) {
+      @NotNull Element primary, @Nullable Element minor) {
     var builder = ExcelConverterData.builder();
-    var opt1 = Optional.ofNullable(element1.getAnnotation(ExcelConverter.class));
-    var opt2 = Optional.ofNullable(element2).map(e -> e.getAnnotation(ExcelConverter.class));
+    if (minor != null
+        && findFormatter(minor)
+            .map(annotation -> getFormatterTypeMirror(annotation, builder))
+            .map(typeMirror -> builder.readerClass(typeMirror).writerClass(typeMirror))
+            .isPresent()) {
+      return builder.build();
+    }
+    var opt1 = Optional.ofNullable(primary.getAnnotation(ExcelConverter.class));
+    var opt2 = Optional.ofNullable(minor).map(e -> e.getAnnotation(ExcelConverter.class));
     builder.writerClass(
         opt1.map(e -> AnnotationUtil.getTypeMirror(e::writer))
             .orElse(opt2.map(e -> AnnotationUtil.getTypeMirror(e::writer)).orElse(null)));
     builder.readerClass(
         opt1.map(e -> AnnotationUtil.getTypeMirror(e::reader))
             .orElse(opt2.map(e -> AnnotationUtil.getTypeMirror(e::reader)).orElse(null)));
-    return builder.build();
+    return builder.initArguments("").build();
+  }
+
+  private static TypeMirror getFormatterTypeMirror(
+      Annotation annotation, ExcelConverterData.ExcelConverterDataBuilder builder) {
+    return AnnotationUtil.getTypeMirror(
+        () -> {
+          if (annotation instanceof DateFormat dateFormat) {
+            builder.initArguments("\"" + dateFormat.value() + "\"");
+            return dateFormat.formatter();
+          }
+          if (annotation instanceof LocalDateFormat localDateFormat) {
+            builder.initArguments("\"" + localDateFormat.value() + "\"");
+            return localDateFormat.formatter();
+          }
+          if (annotation instanceof LocalDateTimeFormat localDateTimeFormat) {
+            builder.initArguments("\"" + localDateTimeFormat.value() + "\"");
+            return localDateTimeFormat.formatter();
+          }
+          if (annotation instanceof NumberFormat numberFormat) {
+            builder.initArguments("\"" + numberFormat.value() + "\"");
+            return numberFormat.formatter();
+          }
+          throw new IllegalStateException("unknown annotation %s".formatted(annotation));
+        });
+  }
+
+  private Optional<? extends Annotation> findFormatter(@NotNull Element element) {
+    return Stream.of(
+            DateFormat.class, LocalDateFormat.class, LocalDateTimeFormat.class, NumberFormat.class)
+        .map(anno -> Optional.ofNullable(element.getAnnotation(anno)))
+        .filter(Optional::isPresent)
+        .map(Optional::get)
+        .findFirst();
   }
 
   @SuppressWarnings({"unchecked", "rawtypes", "RedundantSuppression", "SameParameterValue"})
-  private ExcelColumnData mergeExcelColumn(@NotNull Element element1, @Nullable Element element2) {
-    return mergeExcelColumn(
-        element1.getAnnotation(ExcelColumn.class),
-        Optional.ofNullable(element2).map(e -> e.getAnnotation(ExcelColumn.class)).orElse(null));
-  }
-
-  @SuppressWarnings({"unchecked", "rawtypes", "RedundantSuppression", "SameParameterValue"})
-  private ExcelColumnData mergeExcelColumn(
-      @Nullable ExcelColumn first, @Nullable ExcelColumn second) {
+  private ExcelColumnData mergeExcelColumn(@NotNull Element primary, @Nullable Element minor) {
     var builder = ExcelColumnData.builder();
-    var firstOpt = Optional.ofNullable(first);
-    var secondOpt = Optional.ofNullable(second);
+    var firstOpt = Optional.ofNullable(primary.getAnnotation(ExcelColumn.class));
+    var secondOpt = Optional.ofNullable(minor).map(e -> e.getAnnotation(ExcelColumn.class));
     builder
         .value(
             firstOpt
